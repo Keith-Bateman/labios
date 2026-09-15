@@ -1,9 +1,15 @@
 #include <catch2/catch_test_macros.hpp>
+#include <labios/backend/factory.h>
 #include <labios/backend/kv_backend.h>
 #include <labios/backend/posix_backend.h>
 #include <labios/backend/sqlite_backend.h>
 #include <labios/backend/registry.h>
+#include <labios/config.h>
 #include <labios/transport/redis.h>
+
+#ifdef LABIOS_HAVE_CLIO_BACKEND
+#include <labios/backend/clio_backend.h>
+#endif
 
 #include <cstdlib>
 #include <cstring>
@@ -409,3 +415,115 @@ TEST_CASE("BackendRegistry multi-scheme resolution", "[backend][registry]") {
     std::filesystem::remove_all(tmp);
     std::filesystem::remove(db_path);
 }
+
+// ---------------------------------------------------------------------------
+// BackendFactory tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BackendFactory registers only enabled schemes", "[backend][factory]") {
+    auto tmp = make_temp_dir();
+    auto sqlite_path = tmp / "factory_test.db";
+    std::filesystem::remove(sqlite_path);
+
+    labios::Config cfg;
+    cfg.backends.file_enabled = true;
+    cfg.backends.sqlite_enabled = false;
+    cfg.backends.kv_enabled = false;
+    cfg.backends.clio_enabled = false;
+
+    auto registry = labios::build_backend_registry(cfg, tmp, sqlite_path, nullptr);
+    REQUIRE(registry.has_scheme("file"));
+    REQUIRE_FALSE(registry.has_scheme("sqlite"));
+    REQUIRE_FALSE(registry.has_scheme("kv"));
+    REQUIRE_FALSE(registry.has_scheme("clio"));
+
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("BackendFactory registers file and sqlite by default", "[backend][factory]") {
+    auto tmp = make_temp_dir();
+    auto sqlite_path = tmp / "factory_test_default.db";
+    std::filesystem::remove(sqlite_path);
+
+    labios::Config cfg; // defaults: file + sqlite enabled, kv + clio disabled
+    auto registry = labios::build_backend_registry(cfg, tmp, sqlite_path, nullptr);
+
+    REQUIRE(registry.has_scheme("file"));
+    REQUIRE(registry.has_scheme("sqlite"));
+    REQUIRE_FALSE(registry.has_scheme("kv"));
+
+    std::filesystem::remove_all(tmp);
+    std::filesystem::remove(sqlite_path);
+}
+
+TEST_CASE("BackendFactory skips kv:// when kv_redis is null even if enabled", "[backend][factory]") {
+    auto tmp = make_temp_dir();
+    auto sqlite_path = tmp / "factory_test_kv.db";
+    std::filesystem::remove(sqlite_path);
+
+    labios::Config cfg;
+    cfg.backends.kv_enabled = true;
+
+    auto registry = labios::build_backend_registry(cfg, tmp, sqlite_path, nullptr);
+    REQUIRE_FALSE(registry.has_scheme("kv"));
+
+    std::filesystem::remove_all(tmp);
+    std::filesystem::remove(sqlite_path);
+}
+
+TEST_CASE("BackendFactory registers kv:// when enabled with a connection", "[backend][factory][kv][live]") {
+    auto tmp = make_temp_dir();
+    auto sqlite_path = tmp / "factory_test_kv_live.db";
+    std::filesystem::remove(sqlite_path);
+
+    labios::transport::RedisConnection redis(redis_host(), redis_port());
+    labios::Config cfg;
+    cfg.backends.kv_enabled = true;
+
+    auto registry = labios::build_backend_registry(cfg, tmp, sqlite_path, &redis);
+    REQUIRE(registry.has_scheme("kv"));
+
+    std::filesystem::remove_all(tmp);
+    std::filesystem::remove(sqlite_path);
+}
+
+#ifdef LABIOS_HAVE_CLIO_BACKEND
+// ---------------------------------------------------------------------------
+// ClioCoreBackend tests (require a running clio_run runtime)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ClioCoreBackend put/get/del roundtrip", "[backend][clio][live]") {
+    labios::ClioCoreBackend backend("labios_test:");
+
+    labios::LabelData label;
+    label.id = 1;
+    label.type = labios::LabelType::Write;
+    label.dest_uri = "clio://roundtrip/blob.dat";
+
+    const char* msg = "hello clio-core";
+    auto data = std::as_bytes(std::span(msg, std::strlen(msg)));
+    auto put_result = backend.put(label, data);
+    REQUIRE(put_result.success);
+
+    labios::LabelData read_label;
+    read_label.id = 2;
+    read_label.type = labios::LabelType::Read;
+    read_label.source_uri = "clio://roundtrip/blob.dat";
+
+    auto get_result = backend.get(read_label);
+    REQUIRE(get_result.success);
+    REQUIRE(get_result.data.size() == std::strlen(msg));
+    REQUIRE(std::memcmp(get_result.data.data(), msg, std::strlen(msg)) == 0);
+
+    auto del_result = backend.del(read_label);
+    REQUIRE(del_result.success);
+
+    auto missing_result = backend.get(read_label);
+    REQUIRE_FALSE(missing_result.success);
+}
+
+TEST_CASE("ClioCoreBackend scheme", "[backend][clio][live]") {
+    labios::ClioCoreBackend backend;
+    REQUIRE(backend.scheme() == "clio");
+}
+#endif // LABIOS_HAVE_CLIO_BACKEND

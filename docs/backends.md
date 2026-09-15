@@ -40,10 +40,51 @@ labios::BackendQueryResult query{true, {}, "{}"};
 | `file://` | `PosixBackend` | Worker-visible filesystem attachment |
 | `sqlite://` | `SQLiteBackend` | Worker-visible SQLite database |
 | `kv://` | `KVBackend` | Optional user Redis-compatible service |
+| `clio://` | `ClioCoreBackend` | Optional [clio-core](https://github.com/iowarp/clio-core) Context Transfer Engine (CTE) runtime |
 | `observe://` | Dispatcher-local handler | Registered runtime observations |
 
 S3, vector, graph, and parallel-filesystem adapters are planned and must not be
 presented as callable backends.
+
+### `clio://` (ClioCoreBackend)
+
+`ClioCoreBackend` wraps clio-core's CTE Tag+Blob client
+(`clio::cte::core::CLIO_CTE_CLIENT`). The URI's authority becomes a CTE Tag
+(prefixed by `backends.clio_tag_prefix`, default `labios:`), and the URI path
+becomes the Blob name within that tag — the same authority/path split
+`KVBackend` uses for its key derivation.
+
+It requires:
+
+- Building labios with `-DLABIOS_ENABLE_CLIO_BACKEND=ON` and a discoverable
+  clio-core install (`find_package(clio-core CONFIG REQUIRED)`, so pass
+  `-DCMAKE_PREFIX_PATH=<clio-core install prefix>` if it isn't on the default
+  search path).
+- A running `clio_run` runtime (`clio_run start`), separate from the labios
+  processes — the client auto-connects to it on first use, the same way
+  `kv://` depends on a separately-running Redis-compatible service.
+
+## Backend factory
+
+`labios-worker` no longer hardcodes which backends to construct. At startup
+it calls `labios::build_backend_registry(cfg, storage_root, sqlite_path,
+kv_redis)` (`include/labios/backend/factory.h`), which registers each backend
+according to the `[backends]` table in `labios.toml`:
+
+```toml
+[backends]
+file_enabled = true
+sqlite_enabled = true
+kv_enabled = false
+clio_enabled = false
+clio_tag_prefix = "labios:"
+```
+
+`kv_enabled` also requires `LABIOS_KV_HOST`/`LABIOS_KV_PORT` to be set (the
+Redis connection itself is still constructed by `main()`, since it must
+outlive the registry). `clio_enabled` is a no-op unless the binary was built
+with `LABIOS_ENABLE_CLIO_BACKEND`. Every field has a `LABIOS_BACKEND_*_ENABLED`
+environment override following the existing env-overrides-file convention.
 
 ## Registering an adapter
 

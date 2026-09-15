@@ -1,6 +1,4 @@
-#include <labios/backend/posix_backend.h>
-#include <labios/backend/kv_backend.h>
-#include <labios/backend/sqlite_backend.h>
+#include <labios/backend/factory.h>
 #include <labios/backend/registry.h>
 #include <labios/catalog_manager.h>
 #include <labios/channel.h>
@@ -321,10 +319,6 @@ int main() {
     std::string worker_subject = "labios.worker." + std::to_string(cfg.worker_id);
     std::string worker_name = "worker-" + std::to_string(cfg.worker_id);
 
-    // Backend registry for URI-based routing.
-    labios::BackendRegistry backends;
-    backends.register_backend(labios::PosixBackend(storage_root));
-
     // KV backend uses a SEPARATE Redis instance (not the warehouse).
     const char* kv_host = std::getenv("LABIOS_KV_HOST");
     const char* kv_port_str = std::getenv("LABIOS_KV_PORT");
@@ -332,12 +326,12 @@ int main() {
     if (kv_host && kv_port_str) {
         kv_redis = std::make_unique<labios::transport::RedisConnection>(
             kv_host, std::stoi(kv_port_str));
-        backends.register_backend(labios::KVBackend(*kv_redis));
     }
 
-    // SQLite backend for structured agent memory.
-    auto sqlite_path = (storage_root / "labios.db").string();
-    backends.register_backend(labios::SQLiteBackend(sqlite_path));
+    // Backend registry for URI-based routing, built from cfg.backends.
+    auto sqlite_path = storage_root / "labios.db";
+    labios::BackendRegistry backends = labios::build_backend_registry(
+        cfg, storage_root, sqlite_path, kv_redis.get());
 
     // SDS program repository (shared across all label executions).
     labios::sds::ProgramRepository sds_repo;

@@ -12,6 +12,7 @@ include(cmake/LabiosDependencies.cmake)
 # Keep project warnings off third-party FetchContent targets. Applying -Werror
 # through CMAKE_CXX_FLAGS makes dependency diagnostics break LABIOS builds.
 option(LABIOS_STRICT_WARNINGS "Treat warnings in LABIOS-owned targets as errors" OFF)
+option(LABIOS_ENABLE_CLIO_BACKEND "Enable the clio-core CTE backend adapter (clio:// scheme); requires an installed clio-core and a running clio_run runtime" OFF)
 add_compile_options(-Wno-missing-field-initializers)
 if(LABIOS_STRICT_WARNINGS)
     add_compile_options(-Wall -Wextra -Wpedantic -Werror)

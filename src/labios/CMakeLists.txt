@@ -44,6 +44,7 @@ add_library(labios STATIC
     backend/kv_backend.cpp
     backend/sqlite_backend.cpp
     backend/registry.cpp
+    backend/factory.cpp
     sds/types.cpp
     sds/builtins.cpp
     sds/executor.cpp
@@ -74,3 +75,15 @@ target_link_libraries(labios
 )
 
 target_compile_features(labios PUBLIC cxx_std_20)
+
+if(LABIOS_ENABLE_CLIO_BACKEND)
+    find_package(clio-core CONFIG REQUIRED)
+    target_sources(labios PRIVATE backend/clio_backend.cpp)
+    target_link_libraries(labios
+        PUBLIC
+            clio::cte::core_client
+            clio::run::admin_client
+            clio::run::bdev_client
+    )
+    target_compile_definitions(labios PUBLIC LABIOS_HAVE_CLIO_BACKEND)
+endif()

@@ -599,11 +599,15 @@ concept BackendStore = requires(B b, const LabelData& label,
 };
 ```
 
-Backends register with the registry. Workers resolve URIs at execution time and
-dispatch to the appropriate backend. `file://` and `sqlite://` are registered by
-default; `kv://` is registered when the worker has `LABIOS_KV_HOST` and
-`LABIOS_KV_PORT`. See [backends.md](backends.md) for the authoritative support
-matrix and backend-extension guide.
+Backends register with the registry via `build_backend_registry`
+(`include/labios/backend/factory.h`), a config-driven factory that reads the
+`[backends]` table in `labios.toml` to decide which schemes to construct.
+Workers resolve URIs at execution time and dispatch to the appropriate
+backend. `file://` and `sqlite://` are enabled by default; `kv://` also needs
+`LABIOS_KV_HOST`/`LABIOS_KV_PORT`; `clio://` also needs a
+`LABIOS_ENABLE_CLIO_BACKEND` build and a running `clio_run` runtime. See
+[backends.md](backends.md) for the authoritative support matrix and
+backend-extension guide.
 
 URI structure: `scheme://authority/path?query`
 
@@ -779,7 +783,11 @@ src/labios/                          Core library
   backend/                           Storage abstraction
     backend.h                        BackendStore concept, AnyBackend type erasure
     posix_backend.h/cpp              POSIX filesystem (file:// scheme)
+    kv_backend.h/cpp                 Redis-compatible kv:// scheme
+    sqlite_backend.h/cpp             SQLite sqlite:// scheme
+    clio_backend.h/cpp               clio-core CTE clio:// scheme (LABIOS_ENABLE_CLIO_BACKEND)
     registry.h/cpp                   Scheme-to-backend registry
+    factory.h/cpp                    Config-driven BackendRegistry construction
   sds/                               Programmable data pipelines
     types.h/cpp                      Pipeline, PipelineStage, StageResult
     program_repo.h/cpp               Function registry with builtins

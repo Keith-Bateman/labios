@@ -133,6 +133,13 @@ Config load_config(const std::filesystem::path& path) {
         cfg.elastic.max_pipeline_workers = tbl["elastic"]["max_pipeline_workers"].value_or(cfg.elastic.max_pipeline_workers);
         cfg.elastic.min_agentic_workers = tbl["elastic"]["min_agentic_workers"].value_or(cfg.elastic.min_agentic_workers);
         cfg.elastic.max_agentic_workers = tbl["elastic"]["max_agentic_workers"].value_or(cfg.elastic.max_agentic_workers);
+
+        // [backends]
+        cfg.backends.file_enabled = tbl["backends"]["file_enabled"].value_or(cfg.backends.file_enabled);
+        cfg.backends.sqlite_enabled = tbl["backends"]["sqlite_enabled"].value_or(cfg.backends.sqlite_enabled);
+        cfg.backends.kv_enabled = tbl["backends"]["kv_enabled"].value_or(cfg.backends.kv_enabled);
+        cfg.backends.clio_enabled = tbl["backends"]["clio_enabled"].value_or(cfg.backends.clio_enabled);
+        cfg.backends.clio_tag_prefix = tbl["backends"]["clio_tag_prefix"].value_or(cfg.backends.clio_tag_prefix);
     }
 
     cfg.nats_url        = env_or("LABIOS_NATS_URL", cfg.nats_url);
@@ -203,6 +210,21 @@ Config load_config(const std::filesystem::path& path) {
     cfg.elastic.elastic_worker_energy = env_int_or("LABIOS_ELASTIC_WORKER_ENERGY", cfg.elastic.elastic_worker_energy);
     cfg.elastic.elastic_worker_capacity = env_or("LABIOS_ELASTIC_WORKER_CAPACITY", cfg.elastic.elastic_worker_capacity);
     cfg.elastic.worker_idle_timeout_ms = env_int_or("LABIOS_WORKER_IDLE_TIMEOUT_MS", cfg.elastic.worker_idle_timeout_ms);
+
+    // Backend enablement env overrides.
+    auto env_bool = [](const char* name, bool fallback) -> bool {
+        const char* val = std::getenv(name);
+        if (val != nullptr && val[0] != '\0') {
+            std::string_view sv(val);
+            return (sv == "true" || sv == "1");
+        }
+        return fallback;
+    };
+    cfg.backends.file_enabled = env_bool("LABIOS_BACKEND_FILE_ENABLED", cfg.backends.file_enabled);
+    cfg.backends.sqlite_enabled = env_bool("LABIOS_BACKEND_SQLITE_ENABLED", cfg.backends.sqlite_enabled);
+    cfg.backends.kv_enabled = env_bool("LABIOS_BACKEND_KV_ENABLED", cfg.backends.kv_enabled);
+    cfg.backends.clio_enabled = env_bool("LABIOS_BACKEND_CLIO_ENABLED", cfg.backends.clio_enabled);
+    cfg.backends.clio_tag_prefix = env_or("LABIOS_BACKEND_CLIO_TAG_PREFIX", cfg.backends.clio_tag_prefix);
 
     return cfg;
 }

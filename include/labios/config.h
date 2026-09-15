@@ -83,6 +83,17 @@ struct Config {
 
     ElasticConfig elastic;
 
+    // Backend factory (docs/backends.md): which URI schemes to construct.
+    struct BackendsConfig {
+        bool file_enabled = true;
+        bool sqlite_enabled = true;
+        bool kv_enabled = false;
+        bool clio_enabled = false;
+        std::string clio_tag_prefix = "labios:";
+    };
+
+    BackendsConfig backends;
+
     /// Set a configuration value at runtime. Returns false for unknown keys.
     bool set(const std::string& key, const std::string& value);
 };

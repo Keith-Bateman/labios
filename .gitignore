@@ -1,5 +1,7 @@
 # Build
 build/
+build-clio/
+tests/live/logs/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/

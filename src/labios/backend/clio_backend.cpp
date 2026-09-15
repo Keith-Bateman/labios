@@ -37,7 +37,7 @@ std::pair<std::string, std::string> ClioCoreBackend::tag_and_blob(
 BackendResult ClioCoreBackend::put(const LabelData& label,
                                     std::span<const std::byte> data) {
     auto [tag_name, blob_name] = tag_and_blob(label);
-    auto* client = cte::CLIO_CTE_CLIENT;
+    auto* client = CLIO_CTE_CLIENT;
 
     auto tag_future = client->AsyncGetOrCreateTag(tag_name);
     tag_future.Wait();
@@ -65,7 +65,7 @@ BackendResult ClioCoreBackend::put(const LabelData& label,
 
 BackendDataResult ClioCoreBackend::get(const LabelData& label) {
     auto [tag_name, blob_name] = tag_and_blob(label);
-    auto* client = cte::CLIO_CTE_CLIENT;
+    auto* client = CLIO_CTE_CLIENT;
 
     auto tag_future = client->AsyncGetOrCreateTag(tag_name);
     tag_future.Wait();
@@ -103,7 +103,7 @@ BackendDataResult ClioCoreBackend::get(const LabelData& label) {
 
 BackendResult ClioCoreBackend::del(const LabelData& label) {
     auto [tag_name, blob_name] = tag_and_blob(label);
-    auto* client = cte::CLIO_CTE_CLIENT;
+    auto* client = CLIO_CTE_CLIENT;
 
     auto tag_future = client->AsyncGetOrCreateTag(tag_name);
     tag_future.Wait();
@@ -123,7 +123,7 @@ BackendResult ClioCoreBackend::del(const LabelData& label) {
 BackendQueryResult ClioCoreBackend::query(const LabelData& label) {
     auto [tag_name, blob_name] = tag_and_blob(label);
     (void)blob_name;
-    auto* client = cte::CLIO_CTE_CLIENT;
+    auto* client = CLIO_CTE_CLIENT;
 
     auto tag_future = client->AsyncGetOrCreateTag(tag_name);
     tag_future.Wait();

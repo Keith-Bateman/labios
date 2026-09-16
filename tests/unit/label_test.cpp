@@ -31,6 +31,45 @@ TEST_CASE("P03 normalizes supported URI schemes into typed resources", "[label][
     REQUIRE(kv.key == "/cache-key");
 }
 
+TEST_CASE("P03 normalizes clio:// into a Network-family resource and round-trips the URI",
+          "[label][resources][clio]") {
+    // clio-core's Tag/Blob model has no dedicated ResourceFamily; it reuses
+    // Network (the only family no other scheme claims) with backend_id
+    // "clio" as the disambiguating marker -- see parse_resource in label.cpp.
+    auto clio = labios::resource_from_uri("clio://labios-cache/blobs/one.bin");
+    REQUIRE(clio.family == labios::ResourceFamily::Network);
+    REQUIRE(clio.backend_id == "clio");
+    REQUIRE(clio.host == "labios-cache");
+    REQUIRE(clio.stream == "/blobs/one.bin");
+
+    labios::LabelData label;
+    label.id = 109;
+    label.type = labios::LabelType::Write;
+    label.destination_resource = clio;
+    label.has_destination_resource = true;
+    labios::normalize_label_resources(label);
+    // dest_uri must round-trip to a real "clio://" string -- this is what a
+    // worker's backends.resolve(uri.scheme) actually dispatches on
+    // (labios-worker.cpp), independent of the resource's family.
+    REQUIRE(label.dest_uri == "clio://labios-cache/blobs/one.bin");
+}
+
+TEST_CASE("P03 a NetworkEndpoint-derived resource is never reverse-projected as clio://",
+          "[label][resources][clio]") {
+    labios::LabelData label;
+    label.id = 110;
+    label.type = labios::LabelType::Write;
+    label.destination = labios::network_endpoint("some-host", 9999);
+    labios::normalize_label_resources(label);
+    REQUIRE(label.has_destination_resource);
+    REQUIRE(label.destination_resource.family == labios::ResourceFamily::Network);
+    REQUIRE(label.destination_resource.backend_id == "default");
+    // No reverse-projection case exists for a generic (non-clio) Network
+    // resource -- confirms the clio:// projection added above only fires for
+    // backend_id=="clio", never for an ordinary NetworkEndpoint pointer.
+    REQUIRE(label.dest_uri.empty());
+}
+
 TEST_CASE("P03 URI and legacy Pointer forms coalesce into identical resources", "[label][resources]") {
     labios::LabelData from_uri;
     from_uri.id = 100;

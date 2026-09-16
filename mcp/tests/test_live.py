@@ -108,6 +108,38 @@ def test_mcp_timeout_and_cancellation_projection():
         assert cancelled["error"]["category"] == "CANCELLATION_TOO_LATE"
 
 
+def test_mcp_tool_cache_hits_and_invalidates_against_real_clio_backend():
+    mcp = frontend()
+    uri = f"file:///mcp-live/{uuid.uuid4().hex}.cache-src"
+    payload = b"cache me please"
+    assert mcp.call("labios_store", {
+        "destination": uri,
+        "data": base64.b64encode(payload).decode(),
+        "encoding": "base64",
+    })["ok"]
+
+    first = mcp.call("labios_retrieve", {"source": uri, "encoding": "base64"})
+    assert first["status"] == "completed"
+    assert not first.get("cached")
+    second = mcp.call("labios_retrieve", {"source": uri, "encoding": "base64"})
+    assert second.get("cached") is True
+    assert base64.b64decode(second["data"]) == payload
+
+    stats = mcp.call("labios_observe", {"query": "mcp/tool_cache_stats"})
+    assert stats["observation"]["hits"] >= 1
+
+    # A store to the same URI invalidates the cached entry.
+    updated = b"different bytes now"
+    assert mcp.call("labios_store", {
+        "destination": uri,
+        "data": base64.b64encode(updated).decode(),
+        "encoding": "base64",
+    })["ok"]
+    third = mcp.call("labios_retrieve", {"source": uri, "encoding": "base64"})
+    assert not third.get("cached")
+    assert base64.b64decode(third["data"]) == updated
+
+
 def test_mcp_health_and_worker_observations_via_public_observe():
     mcp = frontend()
     health = mcp.call("labios_observe", {"query": "system/health"})

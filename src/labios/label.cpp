@@ -48,6 +48,21 @@ ResourceRef parse_resource(std::string_view raw) {
     else if (u.scheme == "vector") { r.family = ResourceFamily::Vector; r.database = u.authority; r.collection = u.path; }
     else if (u.scheme == "graph") { r.family = ResourceFamily::Graph; r.database = u.authority; r.graph = u.path; }
     else if (u.scheme == "object" || u.scheme == "s3") { r.family = ResourceFamily::Object; r.bucket = u.authority; r.key = u.path; }
+    else if (u.scheme == "clio") {
+        // clio-core's CTE Tag/Blob model has no dedicated ResourceFamily (adding
+        // one means a new flatbuffers table + regeneration); Network is the only
+        // family no other scheme claims, so it round-trips unambiguously here.
+        // backend_id="clio" is the disambiguating marker normalize_label_resources
+        // checks before reconstructing a "clio://" URI from this family below --
+        // without it, a genuine NetworkEndpoint-derived resource (backend_id=
+        // "default", see resource_from_pointer) could never be confused with one,
+        // but it documents why this field is load-bearing here and not elsewhere.
+        r.family = ResourceFamily::Network;
+        r.backend_id = "clio";
+        r.transport = "clio";
+        r.host = u.authority;
+        r.stream = u.path;
+    }
     else throw LabelDecodeError("UNKNOWN_RESOURCE", "unregistered URI scheme: " + u.scheme);
     return r;
 }
@@ -91,6 +106,8 @@ void normalize_label_resources(LabelData& label) {
             if (result.family == ResourceFamily::FileRange) projected = "file://" + result.path;
             else if (result.family == ResourceFamily::KeyValue) projected = "kv://" + result.database + result.key;
             else if (result.family == ResourceFamily::Relational) projected = "sqlite://" + result.key;
+            else if (result.family == ResourceFamily::Network && result.backend_id == "clio")
+                projected = "clio://" + result.host + result.stream;
             if (source && label.source_uri.empty()) label.source_uri = projected;
             if (!source && label.dest_uri.empty()) label.dest_uri = projected;
             if (result.family == ResourceFamily::FileRange) {

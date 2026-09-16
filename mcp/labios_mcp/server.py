@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 import threading
+import uuid
 from typing import Any, Mapping
 
 import labios
@@ -25,6 +26,8 @@ from labios.registry import PayloadKind
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
+
+from . import tool_cache
 
 app = Server("labios")
 
@@ -271,11 +274,19 @@ def decode_registry_snapshot(payload: bytes) -> WorkerRegistrySnapshot:
     return message.payload
 
 
+def _inert_cache() -> tool_cache.ToolCache:
+    """A cache that never touches the client -- McpFrontend's default so
+    every existing hermetic test (McpFrontend(client), no cache= argument)
+    behaves exactly as before this feature was added."""
+    return tool_cache.ToolCache(tool_cache.NullBackend(), session_id="unset")
+
+
 @dataclass
 class McpFrontend:
     """Synchronous, testable lowering layer behind the async MCP callbacks."""
 
     client: Any
+    cache: tool_cache.ToolCache = field(default_factory=_inert_cache)
 
     def call(self, name: str, arguments: object) -> dict[str, Any]:
         try:
@@ -440,6 +451,9 @@ class McpFrontend:
         if not isinstance(encoding, str):
             raise MalformedRequest("encoding must be a string")
         data = _decode_data(data_text, encoding)
+        return self._write(destination, data, args)
+
+    def _write(self, destination: str, data: bytes, args: Mapping[str, Any]) -> dict[str, Any]:
         params, timeout, cancel = self._params(
             args, labios.LabelType.Write, destination=destination
         )
@@ -447,6 +461,8 @@ class McpFrontend:
         operation = self.client.publish(label, data)
         result = self._wait(operation, timeout, cancel)
         result.update({"destination": destination, "size_bytes": len(data)})
+        if result.get("ok"):
+            self.cache.record_write([destination])
         return result
 
     def retrieve(self, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -457,6 +473,23 @@ class McpFrontend:
         encoding = args.get("encoding", "base64")
         if not isinstance(encoding, str):
             raise MalformedRequest("encoding must be a string")
+
+        # size==0 means "read the full source" (labios-worker.cpp: read_size
+        # = data_size>0 ? data_size : src->length) -- only a full read is
+        # eligible for the shared raw-source cache entry; an explicit
+        # partial/sized read gets its own exact-key entry instead, since a
+        # different size is not the same operation.
+        full_read = size == 0
+        cache_args = {"source": source, "size": size}
+        cached = self.cache.get_raw_source(source) if full_read else self.cache.get("labios_retrieve", cache_args)
+        if cached is not None:
+            data = cached if full_read else base64.b64decode(cached)
+            return {
+                "ok": True, "status": "completed", "label_id": 0, "cached": True,
+                "source": source, "size_bytes": len(data), "encoding": encoding,
+                "data": _encode_data(data, encoding),
+            }
+
         params, timeout, cancel = self._params(args, labios.LabelType.Read, source=source)
         label = self.client.create_label(params)
         label.data_size = size
@@ -470,6 +503,10 @@ class McpFrontend:
                 "encoding": encoding,
                 "data": _encode_data(data, encoding),
             })
+            if full_read:
+                self.cache.put_raw_source(source, data)
+            else:
+                self.cache.put("labios_retrieve", cache_args, base64.b64encode(data).decode("ascii"), [source])
         return result
 
     def process(self, args: Mapping[str, Any]) -> dict[str, Any]:
@@ -500,6 +537,41 @@ class McpFrontend:
                 operation_name, stage_args, input_stage, output_stage
             ))
         pipeline.stages = stages
+
+        pipeline_key = [{
+            "operation": s.operation, "args": s.args,
+            "input_stage": s.input_stage, "output_stage": s.output_stage,
+        } for s in stages]
+        cache_args = {"source": source, "destination": destination, "pipeline": pipeline_key}
+        if self.cache.get("labios_process", cache_args) is not None:
+            return {
+                "ok": True, "status": "completed", "label_id": 0, "cached": True,
+                "source": source, "destination": destination, "stages": len(stages),
+            }
+
+        # Tool transformation: a single, provably-safe-to-reimplement stage
+        # (SAFE_INLINE_OPS) can be served from the shared raw-source cache
+        # entry instead of a real worker-side pipeline run -- the same entry
+        # retrieve() populates on a full read of the same source. See
+        # tool_cache.apply_safe_stage.
+        if (len(stages) == 1 and stages[0].input_stage == -1 and stages[0].output_stage == -1
+                and stages[0].operation in tool_cache.SAFE_INLINE_OPS):
+            raw = self.cache.get_raw_source(source)
+            if raw is None:
+                fetched = self.retrieve({"source": source, "size": 0, "encoding": "base64"})
+                raw = base64.b64decode(fetched["data"]) if fetched.get("ok") else None
+            if raw is not None:
+                try:
+                    computed = tool_cache.apply_safe_stage(stages[0].operation, stages[0].args, raw)
+                except ValueError:
+                    computed = None
+                if computed is not None:
+                    result = self._write(destination, computed, args)
+                    result.update({"source": source, "destination": destination, "stages": len(stages)})
+                    if result.get("ok"):
+                        self.cache.put("labios_process", cache_args, True, [destination])
+                    return result
+
         params, timeout, cancel = self._params(
             args, labios.LabelType.Write, source=source,
             destination=destination, pipeline=pipeline,
@@ -511,14 +583,26 @@ class McpFrontend:
             "destination": destination,
             "stages": len(stages),
         })
+        if result.get("ok"):
+            self.cache.record_write([destination])
+            self.cache.put("labios_process", cache_args, True, [destination])
         return result
 
     def observe(self, args: Mapping[str, Any]) -> dict[str, Any]:
         _reject_unknown(args, {"query", "label_id"})
         query = _string(args, "query", required=True)
+        if query == "mcp/tool_cache_stats":
+            # Process-local counter state, never forwarded to
+            # self.client.observe() -- it's not labios system state.
+            return {"ok": True, "status": "observed", "query": query,
+                    "observation": self.cache.stats.as_dict()}
         if query in {"label/status", "label/inspect"}:
             label_id = _integer(args, "label_id", 0, 1, 2**64 - 1)
             if query == "label/status":
+                cache_args = {"query": query, "label_id": label_id}
+                cached = self.cache.get("labios_observe", cache_args)
+                if cached is not None:
+                    return cached
                 item = self.client.operation([label_id]).test()
                 payload = _completion(item)
                 if payload["state"] == "unknown":
@@ -527,7 +611,13 @@ class McpFrontend:
                         payload["message"] or "completion is unknown or expired",
                         label_id=label_id, completion=payload,
                     )
-                return {"ok": True, "status": "observed", "completion": payload}
+                result = {"ok": True, "status": "observed", "completion": payload}
+                # Only a terminal completion is immutable enough to cache --
+                # no invalidation index applies here, so a non-terminal state
+                # (e.g. parked, still executing) must never be stored.
+                if payload["state"] in {"complete", "failed", "cancelled"}:
+                    self.cache.put("labios_observe", cache_args, result, [])
+                return result
             return {
                 "ok": True,
                 "status": "observed",
@@ -597,6 +687,12 @@ _frontend: McpFrontend | None = None
 _frontend_lock = threading.Lock()
 
 
+def _default_backend(client: Any) -> tool_cache.Backend:
+    if os.environ.get("LABIOS_MCP_TOOL_CACHE", "1") == "0":
+        return tool_cache.NullBackend()
+    return tool_cache.ClioLabelBackend(client)
+
+
 def _default_frontend() -> McpFrontend:
     global _frontend
     with _frontend_lock:
@@ -606,7 +702,8 @@ def _default_frontend() -> McpFrontend:
                 os.environ.get("LABIOS_REDIS_HOST", "redis"),
                 int(os.environ.get("LABIOS_REDIS_PORT", "6379")),
             )
-            _frontend = McpFrontend(client)
+            cache = tool_cache.ToolCache(_default_backend(client), session_id=uuid.uuid4().hex)
+            _frontend = McpFrontend(client, cache=cache)
     return _frontend
 
 
@@ -660,7 +757,12 @@ async def list_tools() -> list[Tool]:
             name="labios_process",
             description=(
                 "Execute a structured, registered bytes-to-bytes pipeline from a "
-                "source URI to a destination URI through one LABIOS worker."
+                "source URI to a destination URI through one LABIOS worker. "
+                "Prefer this over labios_retrieve followed by client-side "
+                "filtering/truncation/deduplication/sampling -- requesting the "
+                "equivalent builtin:// stage here lets repeated calls against the "
+                "same source share one cached read instead of each retrieving it "
+                "independently."
             ),
             inputSchema={
                 "type": "object", "additionalProperties": False,

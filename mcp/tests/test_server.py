@@ -21,6 +21,7 @@ from labios_mcp.server import (
     decode_registry_snapshot,
     list_tools,
 )
+from labios_mcp.tool_cache import ClioLabelBackend, NullBackend, ToolCache
 
 
 class State(Enum):
@@ -93,6 +94,16 @@ class FakeClient:
         self.published = []
         self.observe_calls = []
         self.inspected = None
+        # In-memory clio:// blob store, keyed exactly like ClioCoreBackend's
+        # real tag_and_blob() mapping (host=tag authority, stream=blob path)
+        # -- lets ToolCache(ClioLabelBackend(...)) round-trip against this
+        # fake without a real clio_run runtime.
+        self.clio_store: dict[tuple[str, str], bytes] = {}
+
+    def _clio_key(self, resource):
+        if resource is None or getattr(resource, "backend_id", "") != "clio":
+            return None
+        return (resource.host, resource.stream)
 
     def create_label(self, params):
         label = SimpleNamespace(
@@ -115,6 +126,22 @@ class FakeClient:
 
     def publish(self, label, data=b""):
         self.published.append((label, bytes(data)))
+        if label.type == labios.LabelType.Write:
+            key = self._clio_key(label.destination_resource)
+            if key is not None:
+                self.clio_store[key] = bytes(data)
+                return FakeOperation()
+        elif label.type == labios.LabelType.Read:
+            key = self._clio_key(label.source_resource)
+            if key is not None:
+                stored = self.clio_store.get(key)
+                if stored is None:
+                    return FakeOperation(SimpleNamespace(
+                        state=State.FAILED,
+                        results=[completion(State.FAILED, category="EXECUTION_FAILED",
+                                            error="EXECUTION_FAILED: blob not found")],
+                    ))
+                return FakeOperation(data=stored)
         return self.operations.pop(0) if self.operations else FakeOperation()
 
     def observe(self, query):
@@ -413,3 +440,112 @@ def test_mcp_registry_snapshot_uses_shared_verified_lwr2_parser_only():
         decode_registry_snapshot(b"7,1,0.5,0.2,4,2\n")
     with pytest.raises(UnsupportedRegistryVersion):
         decode_registry_snapshot(_snapshot_buffer(version=3))
+
+
+def test_default_backend_respects_disable_env_var(monkeypatch):
+    import labios_mcp.server as server
+
+    monkeypatch.setenv("LABIOS_MCP_TOOL_CACHE", "0")
+    assert isinstance(server._default_backend(client=object()), NullBackend)
+
+    monkeypatch.setenv("LABIOS_MCP_TOOL_CACHE", "1")
+    assert isinstance(server._default_backend(client=object()), ClioLabelBackend)
+
+
+def test_default_frontend_cache_is_inert_and_never_touches_client():
+    client = FakeClient([FakeOperation(data=b"y")])
+    frontend = McpFrontend(client)
+    frontend.call("labios_retrieve", {"source": "file:///z.bin", "size": 0})
+    assert client.clio_store == {}
+
+
+def test_retrieve_full_read_hits_shared_raw_source_cache_and_invalidates_on_store():
+    client = FakeClient([FakeOperation(data=b"hello world")])
+    cache = ToolCache(ClioLabelBackend(client), session_id="t1")
+    frontend = McpFrontend(client, cache=cache)
+
+    first = frontend.call("labios_retrieve", {"source": "file:///a.txt", "size": 0})
+    cache.backend.wait_for_pending_puts()
+    assert first["status"] == "completed"
+    assert base64.b64decode(first["data"]) == b"hello world"
+    assert not first.get("cached")
+
+    # No more real operations queued -- a second identical retrieve must be
+    # served from the raw-source cache, not a real fetch.
+    second = frontend.call("labios_retrieve", {"source": "file:///a.txt", "size": 0})
+    assert second["cached"] is True
+    assert base64.b64decode(second["data"]) == b"hello world"
+
+    # A store to the same URI invalidates the cached entry.
+    frontend.call("labios_store", {"destination": "file:///a.txt", "data": "new"})
+    client.operations.append(FakeOperation(data=b"new bytes on disk"))
+    third = frontend.call("labios_retrieve", {"source": "file:///a.txt", "size": 0})
+    assert not third.get("cached")
+    assert base64.b64decode(third["data"]) == b"new bytes on disk"
+
+
+def test_process_single_stage_safe_op_reuses_cached_raw_source_without_reexecuting_pipeline():
+    client = FakeClient([FakeOperation(data=b"aabbccdd")])
+    cache = ToolCache(ClioLabelBackend(client), session_id="t2")
+    frontend = McpFrontend(client, cache=cache)
+
+    frontend.call("labios_retrieve", {"source": "file:///src.bin", "size": 0})
+    cache.backend.wait_for_pending_puts()
+
+    published_before = len(client.published)
+    result = frontend.call("labios_process", {
+        "source": "file:///src.bin",
+        "destination": "sqlite:///dst",
+        "pipeline": [{"operation": "builtin://truncate", "args": "4"}],
+    })
+    assert result["status"] == "completed"
+    # Three new publishes: the exact-key cache-miss check, the raw-source
+    # cache-hit check, and the real destination write -- no source re-fetch
+    # and no pipeline-carrying label sent to a worker; truncate ran locally
+    # against the already-cached raw source bytes. Even a "fast path" hit
+    # still pays for cache lookups as real label round trips (see
+    # dazzling-leaping-sprout.md's "Decision" section) -- this only skips
+    # the source re-fetch and worker-side pipeline execution.
+    assert len(client.published) == published_before + 3
+    label, staged = client.published[-1]
+    assert label.destination_resource.path == "/dst"
+    assert staged == b"aabb"
+
+
+def test_process_exact_repeat_is_served_from_cache():
+    client = FakeClient([FakeOperation(data=b"x")])
+    cache = ToolCache(ClioLabelBackend(client), session_id="t3")
+    frontend = McpFrontend(client, cache=cache)
+
+    call_args = {
+        "source": "file:///src2.bin",
+        "destination": "sqlite:///dst2",
+        "pipeline": [{"operation": "builtin://identity"}],
+    }
+    first = frontend.call("labios_process", call_args)
+    cache.backend.wait_for_pending_puts()
+    assert first["status"] == "completed"
+    assert not first.get("cached")
+
+    published_before = len(client.published)
+    second = frontend.call("labios_process", call_args)
+    assert second.get("cached") is True
+    # A hit still costs exactly one label round trip (the cache lookup
+    # itself) -- it replaces re-executing the pipeline, it doesn't make the
+    # call free. See dazzling-leaping-sprout.md's "Decision" section.
+    assert len(client.published) == published_before + 1
+
+
+def test_tool_cache_stats_observable_via_mcp_observe():
+    client = FakeClient([FakeOperation(data=b"content")])
+    cache = ToolCache(ClioLabelBackend(client), session_id="t4")
+    frontend = McpFrontend(client, cache=cache)
+
+    frontend.call("labios_retrieve", {"source": "file:///stats.bin", "size": 0})
+    cache.backend.wait_for_pending_puts()
+    frontend.call("labios_retrieve", {"source": "file:///stats.bin", "size": 0})
+
+    stats = frontend.call("labios_observe", {"query": "mcp/tool_cache_stats"})
+    assert stats["ok"] is True
+    assert stats["observation"]["hits"] >= 1
+    assert stats["observation"]["stores"] >= 1

@@ -19,6 +19,33 @@ public:
     std::string_view scheme() const { return "kv"; }
 };
 static_assert(labios::BackendStore<FakeKvBackend>);
+
+class FakeClioBackend {
+public:
+    labios::BackendResult put(const labios::LabelData&, std::span<const std::byte>) { return {}; }
+    labios::BackendDataResult get(const labios::LabelData&) { return {}; }
+    labios::BackendResult del(const labios::LabelData&) { return {}; }
+    labios::BackendQueryResult query(const labios::LabelData&) { return {}; }
+    std::string_view scheme() const { return "clio"; }
+};
+static_assert(labios::BackendStore<FakeClioBackend>);
+}
+
+TEST_CASE("Worker capabilities advertise a clio attachment with backend_id clio, not default",
+          "[worker-registry][backend][clio]") {
+    labios::BackendRegistry backends;
+    backends.register_backend(FakeClioBackend{});
+
+    labios::WorkerInfo base;
+    base.id = 1;
+    base.registration_epoch = 1;
+    base.tier = labios::WorkerTier::Pipeline;
+    auto capabilities = labios::derive_worker_capabilities(base, backends, {});
+    REQUIRE(capabilities.attachments.size() == 1);
+    const auto& attachment = capabilities.attachments.front();
+    CHECK(attachment.family == static_cast<uint8_t>(labios::ResourceFamily::Network));
+    CHECK(attachment.backend_id == "clio");
+    CHECK(attachment.scheme == "clio");
 }
 
 TEST_CASE("Worker capabilities reflect constructed external backends and tier", "[worker-registry][backend]") {

@@ -39,17 +39,26 @@ std::string resource_identity(const ResourceRef& resource) {
     case ResourceFamily::KeyValue: return resource.database + "/" + resource.namespace_name + "/" + resource.key;
     case ResourceFamily::Object: return resource.bucket + "/" + resource.key;
     case ResourceFamily::Memory: return resource.owner + "/" + resource.allocation_id;
+    case ResourceFamily::Network:
+        if (resource.backend_id == "clio") return resource.host + resource.stream;
+        return resource.path.empty() ? resource.key : resource.path;
     default: return resource.path.empty() ? resource.key : resource.path;
     }
 }
 
-std::string family_scheme(ResourceFamily family) {
+std::string family_scheme(ResourceFamily family, const std::string& backend_id) {
     switch (family) {
     case ResourceFamily::FileRange: return "file";
     case ResourceFamily::Relational: return "sqlite";
     case ResourceFamily::KeyValue: return "kv";
     case ResourceFamily::Object: return "object";
     case ResourceFamily::Memory: return "memory";
+    case ResourceFamily::Network:
+        // Network is shared between clio:// (backend_id "clio", see
+        // parse_resource in label.cpp) and a genuine NetworkEndpoint
+        // pointer (backend_id "default", resource_from_pointer) -- only the
+        // former is a schedulable external backend attachment.
+        return backend_id == "clio" ? "clio" : std::string{};
     default: return {};
     }
 }
@@ -58,7 +67,7 @@ ResourceRequirement requirement(const ResourceRef& resource) {
     ResourceRequirement out;
     out.family = static_cast<uint8_t>(resource.family);
     out.backend_id = resource.backend_id;
-    out.scheme = family_scheme(resource.family);
+    out.scheme = family_scheme(resource.family, resource.backend_id);
     out.identity = resource_identity(resource);
     return out;
 }

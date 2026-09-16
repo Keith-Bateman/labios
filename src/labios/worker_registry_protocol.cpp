@@ -228,11 +228,20 @@ WorkerInfo derive_worker_capabilities(
     base.attachments.clear();
     for (const auto& scheme : backends.schemes()) {
         std::optional<ResourceFamily> family;
+        std::string backend_id = "default";
         if (scheme == "file") family = ResourceFamily::FileRange;
         else if (scheme == "sqlite") family = ResourceFamily::Relational;
         else if (scheme == "kv") family = ResourceFamily::KeyValue;
+        else if (scheme == "clio") {
+            // clio:// resources carry backend_id "clio" (see parse_resource
+            // in label.cpp and family_scheme in scheduling.cpp) -- the
+            // attachment's backend_id must match that, not the "default"
+            // every other scheme here happens to use.
+            family = ResourceFamily::Network;
+            backend_id = "clio";
+        }
         if (!family) continue;
-        base.attachments.push_back({static_cast<uint8_t>(*family), "default", scheme,
+        base.attachments.push_back({static_cast<uint8_t>(*family), backend_id, scheme,
                                     LocalityKind::Shared, {}});
     }
     return base;

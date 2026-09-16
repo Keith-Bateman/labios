@@ -204,6 +204,47 @@ TEST_CASE("both pipeline attachments are required", "[scheduling]") {
                      labios::FeasibilityReason::MissingBackendAttachment) >= 1);
 }
 
+TEST_CASE("clio:// resources are schedulable only to a worker with a matching clio attachment",
+          "[scheduling][clio]") {
+    // Reproduces and pins the fix for a real bug found while wiring SWE-bench
+    // through the Labios MCP tool cache: parse_resource() alone (label.cpp)
+    // let a clio:// label pass admission, but derive_worker_capabilities()
+    // (worker_registry_protocol.cpp) never advertised a "clio" attachment
+    // and family_scheme() (this file) never produced "clio" as a
+    // requirement scheme -- so every worker was MissingBackendAttachment
+    // and the label parked forever, backend enabled or not.
+    labios::LabelData label;
+    label.id = 500;
+    label.type = labios::LabelType::Write;
+    label.dest_uri = "clio://labios-cache/toolcache/blob.bin";
+    labios::normalize_label_resources(label);
+    auto job = labios::describe_job(label);
+    REQUIRE(job.has_value());
+    REQUIRE(job->destinations.size() == 1);
+    CHECK(job->destinations[0].scheme == "clio");
+    CHECK(job->destinations[0].family == static_cast<uint8_t>(labios::ResourceFamily::Network));
+    CHECK(job->destinations[0].backend_id == "clio");
+
+    labios::SchedulingUnitDescriptor unit_desc;
+    unit_desc.unit_id = label.id;
+    unit_desc.ordinal = 0;
+    unit_desc.members = {*job};
+    unit_desc.ready = true;
+
+    auto with_clio = worker(1, 64);
+    with_clio.attachments.push_back(
+        {static_cast<uint8_t>(labios::ResourceFamily::Network), "clio", "clio",
+         labios::LocalityKind::Shared, {}});
+    auto without_clio = worker(2, 64);  // only the file/sqlite attachments worker() gives by default
+
+    auto prepared = labios::prepare_scheduling_batch(
+        labios::SchedulingBatch{1, 1, {unit_desc}}, {with_clio, without_clio});
+    CHECK(prepared.matrix.values[0][0].feasible);
+    CHECK_FALSE(prepared.matrix.values[0][1].feasible);
+    CHECK(std::find(prepared.matrix.values[0][1].reasons.begin(), prepared.matrix.values[0][1].reasons.end(),
+                    labios::FeasibilityReason::MissingBackendAttachment) != prepared.matrix.values[0][1].reasons.end());
+}
+
 TEST_CASE("absolute and cumulative capacity reject placements", "[scheduling]") {
     auto prepared = labios::prepare_scheduling_batch(
         labios::SchedulingBatch{1, 1, {unit(1, 8)}}, {worker(1, 4)});

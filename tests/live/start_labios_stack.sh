@@ -110,7 +110,12 @@ EOF
     _labios_stack_pids+=($!)
 
     # ── Redis (main data-plane store; ContentManager/CatalogManager) ─────
+    # --dir pins the RDB snapshot to the job's own scratch dir -- without it,
+    # redis-server dumps dump.rdb into whatever the caller's CWD happened to
+    # be (e.g. the labios repo root, if sbatch was submitted from there).
+    mkdir -p "$job_state_dir/redis-data"
     "$LABIOS_STACK_REDIS_ENV/bin/redis-server" --port "$LABIOS_STACK_REDIS_PORT" --daemonize no \
+        --dir "$job_state_dir/redis-data" \
         > "$job_state_dir/redis.log" 2>&1 &
     _labios_stack_pids+=($!)
 

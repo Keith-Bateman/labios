@@ -57,6 +57,11 @@ dist/
 # Testing artifacts
 Testing/
 
+# Redis RDB snapshots -- written by any redis-server started without an
+# explicit --dir (e.g. tests/live/start_labios_stack.sh) into whatever the
+# current working directory happened to be.
+*.rdb
+
 # Planning
 # Keep the current authority, active queue, and its index reviewable. Ignore
 # historical, reporting, and session-local planning material by default.
